@@ -15,6 +15,15 @@ def list_jobs(domain_id: int | None = None):
     return pipeline.list_jobs(domain_id)
 
 
+@router.get("/jobs/{job_id}/conservation-proof")
+def conservation_proof(job_id: int):
+    # 守恒证明只读接口：按任务 id 查询，证明落库后不可变，不提供写接口。
+    proof = pipeline.get_conservation_proof(job_id)
+    if proof is None:
+        raise HTTPException(status_code=404, detail="该任务没有守恒证明")
+    return proof
+
+
 @router.post("/jobs/paste-to-detail")
 def paste_to_detail(body: JobBody):
     try:

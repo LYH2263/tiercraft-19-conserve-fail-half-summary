@@ -97,7 +97,87 @@ def _decode_job(row) -> dict:
     d.pop("conservation_json", None)
     d["conserved"] = None if d.get("conserved") is None else bool(d["conserved"])
     d["restored"] = bool(d.get("restored"))
+    d["守恒证明"] = None
     return d
+
+
+def _insert_conservation_proof(
+    conn,
+    job_id: int,
+    domain_id: int,
+    *,
+    detail_total: float,
+    summary_total: float,
+    drift: float,
+    status: str,
+    reason: str,
+) -> None:
+    """守恒证明实体：与任务报告同事务写入，按任务 id 关联，落库后不可变。"""
+    conn.execute(
+        """
+        INSERT INTO conservation_proofs(
+          job_id, domain_id, step, detail_total, summary_total, drift, tolerance,
+          conserved, status, reason
+        ) VALUES (?, ?, 'detail_to_summary', ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            domain_id,
+            detail_total,
+            summary_total,
+            drift,
+            SUMMARY_AMOUNT_TOLERANCE,
+            1 if status == "成功" else 0,
+            status,
+            reason,
+        ),
+    )
+
+
+def _decode_proof(row) -> dict:
+    return {
+        "任务编号": int(row["job_id"]),
+        "主题域编号": int(row["domain_id"]),
+        "步骤": STEP_LABEL.get(row["step"], row["step"]),
+        "明细合计": float(row["detail_total"]),
+        "汇总合计": float(row["summary_total"]),
+        "漂移": float(row["drift"]),
+        "容差": float(row["tolerance"]),
+        "容差说明": TOLERANCE_NOTE,
+        "守恒": bool(row["conserved"]),
+        "成败": row["status"],
+        "失败原因": row["reason"] or "",
+        "时间": row["created_at"],
+    }
+
+
+def _proofs_by_job(conn, job_ids: list[int]) -> dict[int, dict]:
+    if not job_ids:
+        return {}
+    marks = ",".join("?" for _ in job_ids)
+    rows = conn.execute(
+        f"SELECT * FROM conservation_proofs WHERE job_id IN ({marks})",
+        tuple(job_ids),
+    ).fetchall()
+    return {int(r["job_id"]): _decode_proof(r) for r in rows}
+
+
+def get_conservation_proof(job_id: int) -> dict | None:
+    """按任务 id 只读查询守恒证明；该任务没有证明时返回 None。"""
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM conservation_proofs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        return _decode_proof(row) if row else None
+    finally:
+        conn.close()
+
+
+def _job_with_proof(conn, job_id: int) -> dict:
+    job = _decode_job(conn.execute("SELECT * FROM layer_jobs WHERE id=?", (job_id,)).fetchone())
+    job["守恒证明"] = _proofs_by_job(conn, [job_id]).get(job_id)
+    return job
 
 
 def list_jobs(domain_id: int | None = None) -> list[dict]:
@@ -109,7 +189,12 @@ def list_jobs(domain_id: int | None = None) -> list[dict]:
             rows = conn.execute(
                 "SELECT * FROM layer_jobs WHERE domain_id=? ORDER BY id DESC", (domain_id,)
             ).fetchall()
-        return [_decode_job(r) for r in rows]
+        jobs = [_decode_job(r) for r in rows]
+        # 守恒证明与任务记录同源：统一从 conservation_proofs 表派生。
+        proofs = _proofs_by_job(conn, [j["id"] for j in jobs])
+        for j in jobs:
+            j["守恒证明"] = proofs.get(j["id"])
+        return jobs
     finally:
         conn.close()
 
@@ -176,9 +261,7 @@ def run_paste_to_detail(domain_id: int) -> dict:
         )
         conn.commit()
         job_id = int(cur.lastrowid)
-        return _decode_job(
-            conn.execute("SELECT * FROM layer_jobs WHERE id=?", (job_id,)).fetchone()
-        )
+        return _job_with_proof(conn, job_id)
     finally:
         conn.close()
 
@@ -444,11 +527,19 @@ def run_detail_to_summary(domain_id: int) -> dict:
                 ),
             )
             _drop_snapshot(conn, domain_id, snapshot_token)
-            conn.commit()
             job_id = int(cur.lastrowid)
-            return _decode_job(
-                conn.execute("SELECT * FROM layer_jobs WHERE id=?", (job_id,)).fetchone()
+            _insert_conservation_proof(
+                conn,
+                job_id,
+                domain_id,
+                detail_total=detail_total,
+                summary_total=summary_now["amount"],
+                drift=drift,
+                status="成功",
+                reason="",
             )
+            conn.commit()
+            return _job_with_proof(conn, job_id)
         except Exception as exc:  # 守恒失败或任意写入异常：整次任务失败并恢复快照
             # 先在同一事务内读回“本次尝试写入后的残缺汇总”，作为失败现场留档，
             # 再回滚 / 用快照覆盖恢复。
@@ -463,7 +554,9 @@ def run_detail_to_summary(domain_id: int) -> dict:
                 partial_rows = len(buckets)
                 partial_lines = len(detail)
                 partial_keys = len(buckets)
-            conn.commit()
+            # 回滚本次写入事务：汇总层回到任务开始前（快照）状态，
+            # 不留本次写入的半截键或新旧混杂键。
+            conn.rollback()
 
             if isinstance(exc, ConservationError):
                 reason = exc.reason
@@ -472,7 +565,9 @@ def run_detail_to_summary(domain_id: int) -> dict:
 
             restore_info: dict
             try:
-                raise RuntimeError("summary-check")
+                # 失败恢复择一已实现：任务开始前汇总快照表整表回滚
+                # （rollback 已回到快照时仅核对，不一致才按快照整体重写）。
+                restore_info = _restore_summary(conn, domain_id, snapshot_rows)
                 # 恢复后再次核对，确保没有留下本次写入的半截键或新旧混杂键。
                 restored = _summary_totals(conn, domain_id)
                 restored_drift = restored["amount"] - math.fsum(
@@ -480,6 +575,12 @@ def run_detail_to_summary(domain_id: int) -> dict:
                 )
                 restore_info["恢复后金额漂移"] = restored_drift
             except Exception as restore_exc:
+                # 恢复本身出错：撤销恢复过程的半截写入，汇总层不留混杂键，
+                # 快照保留（下方不进入 else 分支，不会清理），待人工按快照恢复。
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 restore_info = {
                     "恢复成功": False,
                     "恢复错误": f"{type(restore_exc).__name__}: {restore_exc}",
@@ -531,8 +632,8 @@ def run_detail_to_summary(domain_id: int) -> dict:
                 "汇总合计": partial_amount,
                 "漂移": partial_amount - detail_total,
                 "容差": SUMMARY_AMOUNT_TOLERANCE,
-                "守恒": True,
-                "成败": "成功",
+                "守恒": False,
+                "成败": "失败",
                 "失败原因": reason,
                 "恢复": restore_info,
                 "容差说明": TOLERANCE_NOTE,
@@ -555,7 +656,7 @@ def run_detail_to_summary(domain_id: int) -> dict:
                   conserved, restored, summary_before_rows, summary_after_rows,
                   summary_before_amount, summary_after_amount, snapshot_token,
                   conservation_json
-                ) VALUES (?, 'detail_to_summary', '成功', ?, ?, 0, 0, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, 'detail_to_summary', '失败', ?, ?, 0, 0, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     domain_id,
@@ -574,11 +675,19 @@ def run_detail_to_summary(domain_id: int) -> dict:
                     json.dumps(conservation, ensure_ascii=False),
                 ),
             )
-            conn.commit()
             job_id = int(cur.lastrowid)
-            return _decode_job(
-                conn.execute("SELECT * FROM layer_jobs WHERE id=?", (job_id,)).fetchone()
+            _insert_conservation_proof(
+                conn,
+                job_id,
+                domain_id,
+                detail_total=detail_total,
+                summary_total=partial_amount,
+                drift=partial_amount - detail_total,
+                status="失败",
+                reason=reason,
             )
+            conn.commit()
+            return _job_with_proof(conn, job_id)
     finally:
         conn.close()
 
@@ -605,6 +714,8 @@ def summary_state(domain_id: int) -> dict:
         last = _decode_job(last_row) if last_row else None
         if last:
             last["step_label"] = STEP_LABEL.get(last["step"], last["step"])
+            # 与任务列表同源：守恒证明同表派生，界面展示同一证明字段。
+            last["守恒证明"] = _proofs_by_job(conn, [last["id"]]).get(last["id"])
         live_drift = summary["amount"] - detail_total
         return {
             "主题域": domain["name"],

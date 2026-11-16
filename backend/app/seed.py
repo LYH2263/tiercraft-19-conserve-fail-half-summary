@@ -78,6 +78,23 @@ CREATE TABLE IF NOT EXISTS layer_jobs (
   FOREIGN KEY(domain_id) REFERENCES domains(id)
 );
 
+CREATE TABLE IF NOT EXISTS conservation_proofs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL UNIQUE,
+  domain_id INTEGER NOT NULL,
+  step TEXT NOT NULL,
+  detail_total REAL NOT NULL,
+  summary_total REAL NOT NULL,
+  drift REAL NOT NULL,
+  tolerance REAL NOT NULL DEFAULT 0.000001,
+  conserved INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(job_id) REFERENCES layer_jobs(id),
+  FOREIGN KEY(domain_id) REFERENCES domains(id)
+);
+
 CREATE TABLE IF NOT EXISTS layer_summary_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   domain_id INTEGER NOT NULL,

@@ -122,15 +122,28 @@ const lastSummaryJob = computed(() => {
           <span v-if="lastSummaryJob.restored" class="warn"> · 汇总层已恢复快照</span>
         </p>
         <p class="muted">{{ lastSummaryJob.message }}</p>
-        <ul v-if="lastSummaryJob.conservation && lastSummaryJob.status === '失败'">
-          <li v-if="lastSummaryJob.conservation.失败原因" class="err-inline">守恒失败原因：{{ lastSummaryJob.conservation.失败原因 }}</li>
-          <li v-if="lastSummaryJob.conservation.恢复">
+        <ul v-if="lastSummaryJob.守恒证明">
+          <li>
+            守恒证明（任务 #{{ lastSummaryJob.守恒证明.任务编号 }}）：
+            明细合计 {{ fmt(lastSummaryJob.守恒证明.明细合计) }}，
+            汇总合计 {{ fmt(lastSummaryJob.守恒证明.汇总合计) }}，
+            漂移 {{ fmt(lastSummaryJob.守恒证明.漂移) }}，
+            容差 {{ lastSummaryJob.守恒证明.容差 }}，
+            成败 <span :class="lastSummaryJob.守恒证明.成败 === '成功' ? 'ok' : 'warn'">{{ lastSummaryJob.守恒证明.成败 }}</span>
+          </li>
+          <li v-if="lastSummaryJob.守恒证明.失败原因" class="err-inline">
+            守恒失败原因：{{ lastSummaryJob.守恒证明.失败原因 }}
+          </li>
+          <li v-if="lastSummaryJob.status === '失败' && lastSummaryJob.conservation && lastSummaryJob.conservation.恢复">
             恢复后汇总态：
             行数 {{ lastSummaryJob.conservation.任务结束时汇总行数 ?? '—' }}，
             金额合计 {{ fmt(lastSummaryJob.conservation.任务结束时汇总合计) }}，
             相对明细漂移 {{ fmt(lastSummaryJob.conservation.任务结束时漂移) }}，
             恢复{{ lastSummaryJob.conservation.恢复.恢复成功 ? '成功' : '失败' }}
           </li>
+        </ul>
+        <ul v-else-if="lastSummaryJob.conservation && lastSummaryJob.status === '失败'">
+          <li v-if="lastSummaryJob.conservation.失败原因" class="err-inline">守恒失败原因：{{ lastSummaryJob.conservation.失败原因 }}</li>
         </ul>
       </div>
       <p v-else class="muted">该主题域还没有明细到汇总任务。</p>

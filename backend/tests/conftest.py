@@ -21,6 +21,7 @@ def client():
     conn = connect()
     try:
         conn.execute("DELETE FROM layer_summary_snapshots")
+        conn.execute("DELETE FROM conservation_proofs")
         conn.execute("DELETE FROM layer_jobs")
         conn.execute("DELETE FROM reconcile_reports")
         conn.execute("DELETE FROM layer_summary")

@@ -87,10 +87,21 @@ const last = computed(() => state.value && state.value.最近任务)
 
     <div v-if="last && last.status === '失败'" class="panel failure-panel">
       <h3>最近一次守恒失败 <span class="warn">· 任务 #{{ last.id }}</span></h3>
-      <p v-if="last.conservation && last.conservation.失败原因" class="err">守恒失败原因：{{ last.conservation.失败原因 }}</p>
+      <p v-if="last.守恒证明 && last.守恒证明.失败原因" class="err">守恒失败原因：{{ last.守恒证明.失败原因 }}</p>
+      <p v-else-if="last.conservation && last.conservation.失败原因" class="err">守恒失败原因：{{ last.conservation.失败原因 }}</p>
       <p class="muted">{{ last.message }}</p>
       <table v-if="last.conservation">
         <tbody>
+          <tr v-if="last.守恒证明">
+            <th>守恒证明</th>
+            <td colspan="3">
+              明细合计 {{ fmt(last.守恒证明.明细合计) }} /
+              汇总合计 {{ fmt(last.守恒证明.汇总合计) }} /
+              漂移 <span class="warn">{{ fmt(last.守恒证明.漂移) }}</span> /
+              容差 {{ last.守恒证明.容差 }} /
+              成败 <span class="warn">{{ last.守恒证明.成败 }}</span>
+            </td>
+          </tr>
           <tr>
             <th>明细合计</th><td>{{ fmt(last.conservation.明细合计) }}</td>
             <th>校验时汇总合计</th><td>{{ fmt(last.conservation.汇总合计) }}</td>
@@ -121,6 +132,14 @@ const last = computed(() => state.value && state.value.最近任务)
     <div v-else-if="last" class="panel">
       <h3>最近一次守恒校验 <span class="ok">· 任务 #{{ last.id }} {{ last.status }}</span></h3>
       <p class="muted">{{ last.message }}</p>
+      <p v-if="last.守恒证明" class="muted">
+        守恒证明（任务 #{{ last.守恒证明.任务编号 }}）：
+        明细合计 {{ fmt(last.守恒证明.明细合计) }}，
+        汇总合计 {{ fmt(last.守恒证明.汇总合计) }}，
+        漂移 {{ fmt(last.守恒证明.漂移) }}，
+        容差 {{ last.守恒证明.容差 }}，
+        成败 <span :class="last.守恒证明.成败 === '成功' ? 'ok' : 'warn'">{{ last.守恒证明.成败 }}</span>
+      </p>
     </div>
 
     <div class="panel">

@@ -193,3 +193,72 @@ def test_restore_rewrite_path_removes_partial_and_mixed_keys(client):
     assert info["恢复方式"] == "按快照重写"
     assert pipeline.layer_rows("summary", 1) == before
     assert "S99" not in {r["store_code"] for r in pipeline.layer_rows("summary", 1)}
+
+
+def test_conservation_proof_entity_and_readonly_endpoint(client):
+    # 守恒证明实体：明细合计、汇总合计、漂移、成败，按任务 id 只读查询
+    job = _setup_layers(client)
+    assert job["守恒证明"]["任务编号"] == job["id"]
+    assert job["守恒证明"]["成败"] == "成功"
+
+    proof = client.get(f"/api/jobs/{job['id']}/conservation-proof").json()
+    assert proof["任务编号"] == job["id"]
+    assert proof["主题域编号"] == 1
+    assert proof["步骤"] == "明细到汇总"
+    assert proof["明细合计"] == pytest.approx(400.5)
+    assert proof["汇总合计"] == pytest.approx(400.5)
+    assert abs(proof["漂移"]) <= pipeline.SUMMARY_AMOUNT_TOLERANCE
+    assert proof["容差"] == pipeline.SUMMARY_AMOUNT_TOLERANCE
+    assert proof["守恒"] is True
+    assert proof["成败"] == "成功"
+    assert proof["失败原因"] == ""
+
+    # 任务列表与汇总状态界面数据同源嵌入同一证明
+    jobs = client.get("/api/jobs?domain_id=1").json()
+    assert jobs[0]["守恒证明"]["任务编号"] == job["id"]
+    assert jobs[0]["守恒证明"]["汇总合计"] == pytest.approx(proof["汇总合计"])
+    state = client.get("/api/layers/summary/state?domain_id=1").json()
+    assert state["最近任务"]["守恒证明"]["明细合计"] == pytest.approx(400.5)
+
+    # 证明落库后刷新仍在（只读接口再读一致）
+    again = client.get(f"/api/jobs/{job['id']}/conservation-proof").json()
+    assert again == proof
+
+
+def test_conservation_proof_records_failure(client):
+    _setup_layers(client)
+
+    from app.services import pipeline as p
+
+    orig = p.aggregate_detail
+
+    def lossy(detail_rows):
+        buckets, keys = orig(detail_rows)
+        buckets.pop(next(iter(buckets)))
+        return buckets, keys
+
+    p.aggregate_detail = lossy
+    try:
+        job = client.post("/api/jobs/detail-to-summary", json={"domain_id": 1}).json()
+    finally:
+        p.aggregate_detail = orig
+
+    assert job["status"] == "失败"
+    assert job["守恒证明"]["成败"] == "失败"
+
+    proof = client.get(f"/api/jobs/{job['id']}/conservation-proof").json()
+    assert proof["成败"] == "失败"
+    assert proof["守恒"] is False
+    assert proof["漂移"] <= -100  # 少了一个键的金额
+    assert "金额不守恒" in proof["失败原因"]
+    # 证明字段与任务报告不可变合计列同源同值
+    assert proof["明细合计"] == pytest.approx(job["amount_detail_total"])
+    assert proof["汇总合计"] == pytest.approx(job["amount_summary_total"])
+    assert proof["漂移"] == pytest.approx(job["amount_drift"])
+
+
+def test_conservation_proof_404_when_absent(client):
+    # 贴源到明细不参与汇总守恒，没有证明；不存在的任务同样 404
+    job = client.post("/api/jobs/paste-to-detail", json={"domain_id": 1}).json()
+    assert client.get(f"/api/jobs/{job['id']}/conservation-proof").status_code == 404
+    assert client.get("/api/jobs/999999/conservation-proof").status_code == 404
